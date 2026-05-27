@@ -5,6 +5,15 @@
 
 const { GoogleGenerativeAI } = require('@google/generative-ai');
 const Groq = require('groq-sdk');
+const {
+  isRateLimitError,
+  validateAPIKeyExists,
+  logError,
+  sleep,
+} = require('../utils/aiErrorHandler');
+
+// Validate API key on module load
+validateAPIKeyExists(process.env.GEMINI_API_KEY, 'Gemini');
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 const groq = process.env.GROQ_API_KEY ? new Groq({ apiKey: process.env.GROQ_API_KEY }) : null;
@@ -14,22 +23,42 @@ const callAI = async (prompt, systemMsg = 'You are an expert resume analyst. Ret
   try {
     const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' });
     const result = await model.generateContent(prompt);
-    return result.response.text();
+    const text = result.response.text();
+    
+    if (!text || !text.trim()) {
+      throw new Error('Empty response from Gemini');
+    }
+    
+    return text;
   } catch (geminiErr) {
-    console.error('⚠️ [Gemini] Failed:', geminiErr.message?.substring(0, 100));
+    logError('Gemini/Advanced', geminiErr);
+    
     if (!groq) throw geminiErr;
+    
     // Groq fallback
-    const completion = await groq.chat.completions.create({
-      messages: [
-        { role: 'system', content: systemMsg },
-        { role: 'user', content: prompt }
-      ],
-      model: 'llama-3.1-8b-instant',
-      temperature: 0.2,
-      max_tokens: 6000,
-      response_format: { type: 'json_object' }
-    });
-    return completion.choices[0]?.message?.content || '';
+    try {
+      console.log('🤖 [Groq] Switching to backup AI...');
+      const completion = await groq.chat.completions.create({
+        messages: [
+          { role: 'system', content: systemMsg },
+          { role: 'user', content: prompt }
+        ],
+        model: 'llama-3.1-8b-instant',
+        temperature: 0.2,
+        max_tokens: 6000,
+        response_format: { type: 'json_object' }
+      });
+      const text = completion.choices[0]?.message?.content || '';
+      
+      if (!text || !text.trim()) {
+        throw new Error('Empty response from Groq');
+      }
+      
+      return text;
+    } catch (groqErr) {
+      logError('Groq/Advanced', groqErr);
+      throw new Error('Both AI services are temporarily busy. Please try again shortly.');
+    }
   }
 };
 

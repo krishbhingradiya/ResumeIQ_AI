@@ -6,21 +6,21 @@
 
 const { GoogleGenerativeAI } = require('@google/generative-ai');
 const Groq = require('groq-sdk');
+const {
+  isRateLimitError,
+  validateAPIKeyExists,
+  logError,
+  sleep,
+  getBackoffDelay,
+} = require('../utils/aiErrorHandler');
+
+// Validate API key on module load
+validateAPIKeyExists(process.env.GEMINI_API_KEY, 'Gemini');
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 const groq = process.env.GROQ_API_KEY
   ? new Groq({ apiKey: process.env.GROQ_API_KEY })
   : null;
-
-/**
- * Check if error is a rate limit error
- */
-const isRateLimitError = (error) => {
-  const msg = (error.message || '').toLowerCase();
-  return msg.includes('429') || msg.includes('quota') || msg.includes('rate') || msg.includes('resource has been exhausted');
-};
-
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /**
  * Build the system prompt for the career advisor
@@ -101,13 +101,13 @@ const getCareerAdvice = async (message, analysisContext, chatHistory = []) => {
   try {
     return await callGeminiChat(messages);
   } catch (geminiError) {
-    console.error('⚠️ [Gemini Chat] Failed:', geminiError.message?.substring(0, 80));
+    logError('Gemini/Chat', geminiError);
 
     if (groq) {
       try {
         return await callGroqChat(messages);
       } catch (groqError) {
-        console.error('❌ [Groq Chat] Also failed:', groqError.message?.substring(0, 80));
+        logError('Groq/Chat', groqError);
         throw new Error('AI advisor is temporarily busy. Please try again in a minute.');
       }
     }
@@ -142,17 +142,23 @@ const callGeminiChat = async (messages) => {
       try {
         const chat = model.startChat({
           systemInstruction,
-          history: chatMessages.slice(0, -1), // All except last message
+          history: chatMessages.slice(0, -1),
         });
 
         const result = await chat.sendMessage(chatMessages[chatMessages.length - 1].parts[0].text);
-        return result.response.text();
+        const text = result.response.text();
+        
+        if (!text || !text.trim()) {
+          throw new Error('Empty response from Gemini');
+        }
+        
+        return text;
       } catch (error) {
         const isLast = attempt === maxRetriesPerModel;
-        console.warn(`[Gemini Chat ${modelName}] Attempt ${attempt} failed: ${error.message.substring(0, 100)}`);
+        console.warn(`[Gemini Chat ${modelName}] Attempt ${attempt} failed: ${error.message?.substring(0, 100) || 'Unknown error'}`);
 
         if (isRateLimitError(error) && !isLast) {
-          const delay = baseDelayMs * Math.pow(2, attempt - 1);
+          const delay = getBackoffDelay(attempt - 1);
           console.log(`⏳ [Gemini Chat] Retrying in ${(delay / 1000).toFixed(1)}s...`);
           await sleep(delay);
           continue;

@@ -9,33 +9,23 @@
 const { GoogleGenerativeAI } = require('@google/generative-ai');
 const Groq = require('groq-sdk');
 const promptTemplate = require('../utils/promptTemplate');
+const {
+  isRateLimitError,
+  validateAPIKeyExists,
+  logError,
+  sleep,
+  getBackoffDelay,
+  getUserFriendlyMessage,
+} = require('../utils/aiErrorHandler');
+
+// Validate API key on module load
+validateAPIKeyExists(process.env.GEMINI_API_KEY, 'Gemini');
 
 // Initialize AI providers
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 const groq = process.env.GROQ_API_KEY
   ? new Groq({ apiKey: process.env.GROQ_API_KEY })
   : null;
-
-/**
- * Check if error is a rate limit error
- */
-const isRateLimitError = (error) => {
-  const msg = (error.message || '').toLowerCase();
-  const status = error.status || error.statusCode || 0;
-  return (
-    status === 429 ||
-    msg.includes('429') ||
-    msg.includes('quota') ||
-    msg.includes('rate') ||
-    msg.includes('resource has been exhausted') ||
-    msg.includes('too many requests')
-  );
-};
-
-/**
- * Sleep helper for retry backoff
- */
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /**
  * Analyze resume using AI — tries Gemini first, then Groq as backup
@@ -54,10 +44,7 @@ const analyzeResume = async (resumeText, pdfBuffer = null, targetRole = '') => {
     console.log('✅ [Gemini] Analysis complete');
     return parseAIResponse(text);
   } catch (geminiError) {
-    console.error(
-      '⚠️ [Gemini] Failed:',
-      geminiError.message?.substring(0, 200)
-    );
+    logError('Gemini/Resume', geminiError);
 
     // === TRY 2: Groq backup ===
     if (groq) {
@@ -67,10 +54,7 @@ const analyzeResume = async (resumeText, pdfBuffer = null, targetRole = '') => {
         console.log('✅ [Groq] Analysis complete');
         return parseAIResponse(text);
       } catch (groqError) {
-        console.error(
-          '❌ [Groq] Also failed:',
-          groqError.message?.substring(0, 200)
-        );
+        logError('Groq/Resume', groqError);
         throw new Error(
           'Both AI services are temporarily busy. Please try again in 1 minute.'
         );
@@ -102,17 +86,24 @@ const callGeminiWithRetry = async (prompt, maxRetries = 2) => {
       try {
         const model = genAI.getGenerativeModel({ model: modelName });
         const result = await model.generateContent(prompt);
-        return result.response.text();
+        const text = result.response.text();
+        
+        if (!text || !text.trim()) {
+          throw new Error('Empty response from Gemini');
+        }
+        
+        return text;
       } catch (error) {
         const isLast = attempt === maxRetries - 1;
+        const errorMsg = error.message?.substring(0, 100) || 'Unknown error';
         console.warn(
-          `⚠️ [Gemini/${modelName}] Attempt ${attempt + 1}/${maxRetries}: ${error.message?.substring(0, 100)}`
+          `⚠️ [Gemini/${modelName}] Attempt ${attempt + 1}/${maxRetries}: ${errorMsg}`
         );
 
         if (isRateLimitError(error) && !isLast) {
-          const delay = Math.pow(2, attempt) * 2000 + Math.random() * 1000;
+          const delay = getBackoffDelay(attempt);
           console.log(
-            `⏳ [Gemini] Retrying in ${(delay / 1000).toFixed(1)}s...`
+            `⏳ [Gemini] Rate limited, retrying in ${(delay / 1000).toFixed(1)}s...`
           );
           await sleep(delay);
           continue;

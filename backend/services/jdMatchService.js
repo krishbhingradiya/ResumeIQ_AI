@@ -6,15 +6,18 @@
 
 const { GoogleGenerativeAI } = require('@google/generative-ai');
 const Groq = require('groq-sdk');
+const {
+  isRateLimitError,
+  validateAPIKeyExists,
+  logError,
+  sleep,
+} = require('../utils/aiErrorHandler');
+
+// Validate API key on module load
+validateAPIKeyExists(process.env.GEMINI_API_KEY, 'Gemini');
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 const groq = process.env.GROQ_API_KEY ? new Groq({ apiKey: process.env.GROQ_API_KEY }) : null;
-
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const isRateLimitError = (e) => {
-  const m = (e.message || '').toLowerCase();
-  return m.includes('429') || m.includes('quota') || m.includes('rate') || m.includes('resource has been exhausted');
-};
 
 /**
  * Match resume against a job description
@@ -28,10 +31,16 @@ const matchResumeToJD = async (resumeText, jobDescription) => {
     const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' });
     const result = await model.generateContent(prompt);
     responseText = result.response.text();
+    
+    if (!responseText || !responseText.trim()) {
+      throw new Error('Empty response from Gemini');
+    }
   } catch (geminiError) {
-    console.error('⚠️ [Gemini JD Match] Failed:', geminiError.message?.substring(0, 100));
+    logError('Gemini/JDMatch', geminiError);
+    
     if (groq) {
       try {
+        console.log('🤖 [Groq] Switching to backup AI...');
         const completion = await groq.chat.completions.create({
           messages: [
             { role: 'system', content: 'You are an expert ATS analyst and job matching specialist. Return ONLY valid JSON.' },
@@ -43,7 +52,12 @@ const matchResumeToJD = async (resumeText, jobDescription) => {
           response_format: { type: 'json_object' }
         });
         responseText = completion.choices[0]?.message?.content || '';
+        
+        if (!responseText || !responseText.trim()) {
+          throw new Error('Empty response from Groq');
+        }
       } catch (groqError) {
+        logError('Groq/JDMatch', groqError);
         throw new Error('AI services are temporarily busy. Please try again shortly.');
       }
     } else {

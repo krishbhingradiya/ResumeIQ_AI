@@ -14,11 +14,17 @@
 
 const { GoogleGenerativeAI } = require('@google/generative-ai');
 const Groq = require('groq-sdk');
+const {
+  validateAPIKeyExists,
+  logError,
+  sleep,
+} = require('../utils/aiErrorHandler');
+
+// Validate API key on module load
+validateAPIKeyExists(process.env.GEMINI_API_KEY, 'Gemini');
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 const groq = process.env.GROQ_API_KEY ? new Groq({ apiKey: process.env.GROQ_API_KEY }) : null;
-
-const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
 /**
  * Compress prompt for smaller context models
