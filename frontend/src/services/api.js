@@ -1,4 +1,5 @@
 import axios from 'axios';
+import { getSupabaseErrorMessage, isNetworkError } from './supabaseClient';
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:5000';
 
@@ -8,18 +9,92 @@ const api = axios.create({
   headers: { 'Accept': 'application/json' },
 });
 
-// ── Error handler helper ──
+// ━━━ PRODUCTION-GRADE ERROR HANDLER ━━━
 const handleApiError = (error, context = 'Request') => {
-  if (error.response) {
-    const serverError = error.response.data?.error || `${context} error occurred`;
-    throw new Error(serverError.length > 150 ? serverError.substring(0, 150) + '...' : serverError);
-  } else if (error.code === 'ECONNABORTED') {
-    throw new Error(`${context} is taking longer than expected. Please try again.`);
-  } else if (error.request) {
-    throw new Error('Cannot connect to server. Please check if the backend is running.');
-  } else {
-    throw new Error('An unexpected error occurred. Please try again.');
+  // Network errors
+  if (!error.response && error.code === 'ECONNABORTED') {
+    const userMessage = `${context} timed out after 3 minutes. Your connection may be slow. Please try again.`;
+    console.error(`⏱️ Timeout [${context}]:`, error.message);
+    throw new Error(userMessage);
   }
+
+  // Network connection failures
+  if (!error.response) {
+    if (error.code === 'ECONNREFUSED' || error.message?.includes('ECONNREFUSED')) {
+      const userMessage = 'Cannot connect to server. Please check if the backend is running.';
+      console.error(`🔌 Connection Refused [${context}]:`, error.message);
+      throw new Error(userMessage);
+    }
+
+    if (error.message?.includes('Network') || error.message?.includes('offline')) {
+      const userMessage = 'You appear to be offline. Please check your internet connection.';
+      console.error(`📡 Network Error [${context}]:`, error.message);
+      throw new Error(userMessage);
+    }
+
+    // Generic network error
+    const userMessage = 'Unable to reach the server. Please check your internet and try again.';
+    console.error(`❌ Network Error [${context}]:`, error.message);
+    throw new Error(userMessage);
+  }
+
+  // Server response errors
+  if (error.response) {
+    const status = error.response.status;
+    const serverError = error.response.data?.error || error.response.data?.message || `${context} failed`;
+
+    // Authentication errors (401)
+    if (status === 401) {
+      const userMessage = 'Your session has expired. Please refresh and try again.';
+      console.error(`🔐 Auth Error [${context}] (401):`, serverError);
+      throw new Error(userMessage);
+    }
+
+    // Forbidden (403)
+    if (status === 403) {
+      const userMessage = 'You do not have permission to perform this action.';
+      console.error(`🚫 Forbidden [${context}] (403):`, serverError);
+      throw new Error(userMessage);
+    }
+
+    // Not found (404)
+    if (status === 404) {
+      const userMessage = 'The requested resource was not found. Please try again.';
+      console.error(`📍 Not Found [${context}] (404):`, serverError);
+      throw new Error(userMessage);
+    }
+
+    // Bad request (400)
+    if (status === 400) {
+      const userMessage = serverError.length > 150 ? serverError.substring(0, 150) + '...' : serverError;
+      console.error(`⚠️ Bad Request [${context}] (400):`, serverError);
+      throw new Error(userMessage);
+    }
+
+    // Rate limiting (429)
+    if (status === 429) {
+      const userMessage = 'Too many requests. Please wait a moment and try again.';
+      console.error(`⏳ Rate Limited [${context}] (429):`, serverError);
+      throw new Error(userMessage);
+    }
+
+    // Server errors (5xx)
+    if (status >= 500) {
+      const userMessage = `Server error (${status}). Please try again later or contact support.`;
+      console.error(`💥 Server Error [${context}] (${status}):`, serverError);
+      throw new Error(userMessage);
+    }
+
+    // Generic server error
+    const userMessage = serverError.length > 150 ? serverError.substring(0, 150) + '...' : serverError;
+    console.error(`❌ Error [${context}] (${status}):`, serverError);
+    throw new Error(userMessage);
+  }
+
+  // Unknown error
+  const userMessage = 'An unexpected error occurred. Please try again.';
+  console.error(`⚠️ Unknown Error [${context}]:`, error.message);
+  throw new Error(userMessage);
 };
 
 /**
